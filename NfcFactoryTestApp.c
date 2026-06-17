@@ -13,12 +13,21 @@
 */
 
 #include <stdio.h>
+#include <signal.h>
 #include <unistd.h>
 #include <tml.h>
 
+#define TP() printf("%s:%s:%d\n", __FILE__, __func__, __LINE__)
 #define print_buf(x,y,z)  {int loop; printf(x); for(loop=0;loop<z;loop++) printf("0x%.2x ", y[loop]); printf("\n");}
 
 static char gNfcController_generation = 0;
+static volatile sig_atomic_t is_stop_requested = 0;
+
+static void handle_signal(int signo)
+{
+    (void)signo;
+    is_stop_requested = 1;
+}
 
 static void RfOn (int handle)
 {
@@ -59,9 +68,11 @@ static void Functional (int handle)
         return;
     }
     printf("NFC Controller is now in functional mode - Press Crtl^Z to stop\n");
-    while(1) {
+	while(!is_stop_requested) {
     	do {
             tml_receive(handle,  Answer, sizeof(Answer));
+	        if (is_stop_requested)
+	            return;
     	} while ((Answer[0] != 0x61) || ((Answer[1] != 0x05) && (Answer[1] != 0x03)));
 	printf(" - tag discovered, restarting discovery loop ...\n"); tml_transceive(handle, NCIRestartDiscovery, sizeof(NCIRestartDiscovery), Answer, sizeof(Answer));
     }
@@ -366,47 +377,66 @@ static int reset_controller(int handle)
     char Answer[256];
     int NbBytes = 0;
 
+    TP();
     tml_reset(handle);
+    TP();
     tml_transceive(handle, NCICoreReset, sizeof(NCICoreReset), Answer, sizeof(Answer));
+    TP();
 
     /* Catch potential notification */
     usleep(100*1000);
+    TP();
     NbBytes = tml_receive(handle,  Answer, sizeof(Answer));
+    printf("NbBytes = %d\n", NbBytes);
+    TP();
 
     tml_transceive(handle, NCICoreReset, sizeof(NCICoreReset), Answer, sizeof(Answer));
+    TP();
 
     /* Catch potential notification */
     usleep(100*1000);
+    TP();
     NbBytes = tml_receive(handle,  Answer, sizeof(Answer));
+    TP();
 
     if((NbBytes == 12) && (Answer[0] == 0x60) && (Answer[1] == 0x00) && (Answer[3] == 0x02))
     {
-	NbBytes = tml_transceive(handle, NCICoreInit2_0, sizeof(NCICoreInit2_0), Answer, sizeof(Answer));
+        TP();
+        NbBytes = tml_transceive(handle, NCICoreInit2_0, sizeof(NCICoreInit2_0), Answer, sizeof(Answer));
+        TP();
         if((NbBytes < 19) || (Answer[0] != 0x40) || (Answer[1] != 0x01) || (Answer[3] != 0x00))    {
             printf("Error communicating with NFC Controller\n");
             return -1;
         }
         gNfcController_generation = 3;
+        TP();
     }
     else
     {
-	NbBytes = tml_transceive(handle, NCICoreInit1_0, sizeof(NCICoreInit1_0), Answer, sizeof(Answer));
+        TP();
+        NbBytes = tml_transceive(handle, NCICoreInit1_0, sizeof(NCICoreInit1_0), Answer, sizeof(Answer));
+        TP();
         if((NbBytes < 19) || (Answer[0] != 0x40) || (Answer[1] != 0x01) || (Answer[3] != 0x00))    {
             printf("Error communicating with PN71xx NFC Controller\n");
             return -1;
         }
-
+        TP();
         /* Retrieve NXP-NCI NFC Controller generation */
         if (Answer[17+Answer[8]] == 0x08) {
+            TP();
             gNfcController_generation = 1;
         }
         else if (Answer[17+Answer[8]] == 0x10) {
+            TP();
             gNfcController_generation = 2;
         }
         else {
+            TP();
             return -1;
         }
+        TP();
     }
+    TP();
     return 0;
 }
 
@@ -421,15 +451,24 @@ int main()
     printf("NFC Factory Test Application\n");
     printf("----------------------------\n");
 
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
+
+    TP();
+
     if(tml_open(&nHandle) != 0) {
         printf("Cannot connect to NFC controller\n");
         return -1;
     }
 
+    TP();
+
     if(reset_controller(nHandle) != 0) {
         printf("Error communicating with the NFC Controller\n");
-        return -1;
+        sleep(1);
+        //return -1;
     }
+    TP();
 
     switch(gNfcController_generation) {
     case 1: printf("PN7120 NFC controller detected\n"); break;
@@ -438,8 +477,12 @@ int main()
     default: printf("Wrong NFC controller detected\n"); break;
     }
 
+    TP();
+
     /* Disable standby mode */
     tml_transceive(nHandle, NCIDisableStandby, sizeof(NCIDisableStandby), Answer, sizeof(Answer));
+
+    TP();
 
     do {
         printf("Select the test to run:\n");
@@ -478,10 +521,14 @@ int main()
             case 10: SetPropParam(nHandle); break;
             default: printf("Wrong choice\n"); break;
         }
-    } while(choice != 0);
+    } while(choice != 0 && !is_stop_requested);
 
+out:
+    TP();
     tml_reset(nHandle);
+    TP();
     tml_close(nHandle);
+    TP();
 
     return 0;
 }

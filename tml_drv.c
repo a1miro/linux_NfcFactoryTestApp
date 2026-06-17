@@ -18,6 +18,10 @@
 #include <sys/time.h>
 #include <sys/ioctl.h>
 #include <tml.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#define TP() printf("%s:%s:%d\n", __FILE__, __func__, __LINE__)
 
 int tml_open(int *handle)
 {
@@ -36,20 +40,24 @@ void tml_close(int handle)
 
 void tml_reset(int handle)
 {
-    ioctl(handle, _IOW(0xE9, 0x01, long), 0);
+    ioctl(handle, _IOW(0xE9, 0x01, uint32_t), 0);
     usleep(10 * 1000);
-    ioctl(handle, _IOW(0xE9, 0x01, long), 1);
+    ioctl(handle, _IOW(0xE9, 0x01, uint32_t), 1);
     usleep(10 * 1000);
 }
 
 int tml_send(int handle, char *pBuff, int buffLen)
 {
+    TP();
     int ret = write(handle, pBuff, buffLen);
+    printf("write: ret = %d, buffLen = %d\n", ret, buffLen);
     if(ret <= 0) {
+        TP();
         /* retry to handle standby mode */
         ret = write(handle, pBuff, buffLen);
-        if(ret <= 0) return 0;
+        printf("write: ret = %d, buffLen = %d\n", ret, buffLen);
     }
+    
     PRINT_BUF(">> ", pBuff, ret);
     return ret;
 }
@@ -61,20 +69,31 @@ int tml_receive(int handle, char *pBuff, int buffLen)
     fd_set rfds;
     int ret;
 
+    TP();
+
     FD_ZERO(&rfds);
+    TP();
     FD_SET(handle, &rfds);
+    TP();
     tv.tv_sec = 2;
     tv.tv_usec = 1;
     ret = select(handle+1, &rfds, NULL, NULL, &tv);
-    if(ret <= 0) return 0;
+    TP();
 
+    if(ret <= 0) {
+        printf("select: ret = %d\n", ret);
+        exit(ret);
+    }
+
+    TP();
     ret = read(handle, pBuff, 3);
-    if (ret <= 0) return 0;
+    TP();
+    if (ret <= 0){TP(); return 0;}
     numRead = 3;
-    if(pBuff[2] + 3 > buffLen) return 0;
-
+    if(pBuff[2] + 3 > buffLen) {TP(); return 0;}
+    TP();
     ret = read(handle, &pBuff[3], pBuff[2]);
-    if (ret <= 0) return 0;
+    if (ret <= 0) {TP();return 0;}
     numRead += ret;
 
     PRINT_BUF("<< ", pBuff, numRead);
@@ -84,6 +103,8 @@ int tml_receive(int handle, char *pBuff, int buffLen)
 
 int tml_transceive(int handle, char *pTx, int TxLen, char *pRx, int RxLen)
 {
-    if(tml_send(handle, pTx, TxLen) == 0) return 0;
+    TP();
+    if(tml_send(handle, pTx, TxLen) == 0) {TP(); return 0;}
+    TP();
     return tml_receive(handle, pRx, RxLen);
 }

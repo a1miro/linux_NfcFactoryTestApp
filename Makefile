@@ -1,4 +1,4 @@
-CC=gcc
+CC?=gcc
 
 CFILES=NfcFactoryTestApp.c
 
