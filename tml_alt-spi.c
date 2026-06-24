@@ -21,99 +21,157 @@
 #include <poll.h>
 #include <tml.h>
 #include <linux/spi/spidev.h>
+#include <gpiod.h>
 
-#define SPI_BUS         "/dev/spidev0.0"
+#define SPI_BUS         "/dev/spidev6.0"
 #define SPI_MODE	SPI_MODE_0;
 #define SPI_BITS	8;
-#define SPI_SPEED       5000000
+#define SPI_SPEED       1000000 // 1 MHz
 
-#define PIN_INT         23
-#define PIN_ENABLE      24
+#define IRQ_GPIO_CHIP_PATH   "/dev/gpiochip0"
+#define IRQ_GPIO_OFFSET      10
+#define VEN_GPIO_CHIP_PATH   "/dev/gpiochip4"
+#define VEN_GPIO_OFFSET      6
 
-#define EDGE_NONE    0
-#define EDGE_RISING  1
-#define EDGE_FALLING 2
-#define EDGE_BOTH    3
+struct gpio_line_desc {
+    const char *chipPath;
+    unsigned int offset;
+    struct gpiod_chip *chip;
+    struct gpiod_line_request *request;
+};
 
-static int iEnableFd    = 0;
-static int iInterruptFd = 0;
+static struct gpio_line_desc gInterruptLine = {
+    .chipPath = IRQ_GPIO_CHIP_PATH,
+    .offset = IRQ_GPIO_OFFSET,
+    .chip = NULL,
+    .request = NULL,
+};
 
-static int verifyPin( int pin, int isoutput, int edge ) {
-    char buf[40];
-    int hasGpio = 0;
+static struct gpio_line_desc gEnableLine = {
+    .chipPath = VEN_GPIO_CHIP_PATH,
+    .offset = VEN_GPIO_OFFSET,
+    .chip = NULL,
+    .request = NULL,
+};
 
-    sprintf( buf, "/sys/class/gpio/gpio%d", pin );
-    int fd = open( buf, O_RDONLY );
-    if ( fd <= 0 ) {
-        // Pin not exported yet
-        if ( ( fd = open( "/sys/class/gpio/export", O_WRONLY ) ) > 0 ) {
-            sprintf(buf, "%d", pin);
-            if ( write( fd, buf, strlen(buf)) == strlen(buf)) {
-                hasGpio = 1;
-            }
-            close( fd );
-        }
-    } else {
-        hasGpio = 1;
-        close( fd );
+static struct gpiod_line_request *requestLine(struct gpiod_chip *chip,
+                                              unsigned int offset,
+                                              enum gpiod_line_direction direction,
+                                              enum gpiod_line_value outputValue,
+                                              int enableEdgeDetect)
+{
+    struct gpiod_line_settings *settings = NULL;
+    struct gpiod_line_config *lineCfg = NULL;
+    struct gpiod_request_config *reqCfg = NULL;
+    struct gpiod_line_request *request = NULL;
+
+    settings = gpiod_line_settings_new();
+    lineCfg = gpiod_line_config_new();
+    reqCfg = gpiod_request_config_new();
+    if (!settings || !lineCfg || !reqCfg) goto done;
+
+    if (gpiod_line_settings_set_direction(settings, direction) < 0) goto done;
+    if (enableEdgeDetect) {
+        if (gpiod_line_settings_set_edge_detection(settings, GPIOD_LINE_EDGE_RISING) < 0) goto done;
     }
-    usleep(100000);
-    if ( hasGpio ) {
-        // Make sure it is an output
-        sprintf( buf, "/sys/class/gpio/gpio%d/direction", pin );
-        fd = open( buf, O_WRONLY );
-        if ( fd > 0 ) {
-            if ( isoutput ) {
-                write(fd,"out",3);
-                close(fd);
-
-                // Open pin and make sure it is off
-                sprintf( buf, "/sys/class/gpio/gpio%d/value", pin );
-                fd = open( buf, O_RDWR );
-                if ( fd > 0 ) {
-                    write( fd, "0", 1 );
-                    return( fd );  // Success
-                }
-            } else {
-                write(fd,"in",2);
-                close(fd);
-
-                if(edge != EDGE_NONE) {
-                    // Open pin edge control
-                    sprintf( buf, "/sys/class/gpio/gpio%d/edge", pin );
-                    fd = open( buf, O_RDWR );
-                    if ( fd > 0 ) {
-                        char * edge_str = "none";
-                        switch ( edge ) {
-                          case EDGE_RISING:  edge_str = "rising"; break;
-                          case EDGE_FALLING: edge_str = "falling"; break;
-                          case EDGE_BOTH:    edge_str = "both"; break;
-                          default: break;
-                        }
-                        write( fd, edge_str, strlen(edge_str));
-                        close(fd);
-                    }
-                }
-                // Open pin
-                sprintf( buf, "/sys/class/gpio/gpio%d/value", pin );
-                fd = open( buf, O_RDONLY );
-                if ( fd > 0 ) {
-                    return( fd ); // Success
-                }
-            }
-        }
+    if (direction == GPIOD_LINE_DIRECTION_OUTPUT &&
+        gpiod_line_settings_set_output_value(settings, outputValue) < 0) {
+        goto done;
     }
-    return( 0 );
+    if (gpiod_line_config_add_line_settings(lineCfg, &offset, 1, settings) < 0) goto done;
+
+    gpiod_request_config_set_consumer(reqCfg, "NfcFactoryTestApp");
+    request = gpiod_chip_request_lines(chip, reqCfg, lineCfg);
+
+done:
+    gpiod_request_config_free(reqCfg);
+    gpiod_line_config_free(lineCfg);
+    gpiod_line_settings_free(settings);
+    return request;
+}
+
+static int openLine(struct gpio_line_desc *line,
+                    enum gpiod_line_direction direction,
+                    enum gpiod_line_value outputValue,
+                    int enableEdgeDetect)
+{
+    line->chip = gpiod_chip_open(line->chipPath);
+    if (!line->chip) {
+        perror("gpiod_chip_open");
+        return -1;
+    }
+
+    line->request = requestLine(line->chip, line->offset, direction, outputValue, enableEdgeDetect);
+    if (!line->request) {
+        perror("gpiod request line");
+        gpiod_chip_close(line->chip);
+        line->chip = NULL;
+        return -1;
+    }
+
+    return 0;
+}
+
+static void closeLine(struct gpio_line_desc *line)
+{
+    if (line->request) {
+        gpiod_line_request_release(line->request);
+        line->request = NULL;
+    }
+    if (line->chip) {
+        gpiod_chip_close(line->chip);
+        line->chip = NULL;
+    }
+}
+
+static void closeGpio(void)
+{
+    closeLine(&gEnableLine);
+    closeLine(&gInterruptLine);
+}
+
+static int openGpio(void)
+{
+    if (openLine(&gInterruptLine, GPIOD_LINE_DIRECTION_INPUT,
+                 GPIOD_LINE_VALUE_INACTIVE, 1) < 0) {
+        goto error;
+    }
+
+    if (openLine(&gEnableLine, GPIOD_LINE_DIRECTION_OUTPUT,
+                 GPIOD_LINE_VALUE_INACTIVE, 0) < 0) {
+        goto error;
+    }
+
+    return 0;
+
+error:
+    closeGpio();
+    return -1;
 }
 
 static int pnGetint( void ) {
-    char buf[2];
-    int len;
-    if (iInterruptFd <= 0) return -1;
-    lseek(iInterruptFd, SEEK_SET, 0);
-    len = read(iInterruptFd, buf, 2);
-    if (len != 2) return 0;
-    return (buf[0] != '0');
+    int val, ret;
+
+    if (!gInterruptLine.request) return -1;
+
+    /* Wait up to 2 seconds for an edge event (rising edge) */
+    ret = gpiod_line_request_wait_edge_events(gInterruptLine.request, 2000000000LL);
+    if (ret < 0) {
+        perror("gpiod_line_request_wait_edge_events");
+        return -1;
+    }
+    if (ret == 0) {
+        /* Timeout - no edge detected */
+        return 0;
+    }
+
+    /* Edge detected, read the current value to confirm */
+    val = gpiod_line_request_get_value(gInterruptLine.request, gInterruptLine.offset);
+    if (val == GPIOD_LINE_VALUE_ERROR) {
+        perror("gpiod_line_get_value(IRQ)");
+        return -1;
+    }
+    return (val == GPIOD_LINE_VALUE_ACTIVE);
 }
 
 static int SpiRead(int pDevHandle, char* pBuffer, int nBytesToRead) {
@@ -127,7 +185,7 @@ static int SpiRead(int pDevHandle, char* pBuffer, int nBytesToRead) {
     spi[0].delay_usecs = 0;
     spi[0].speed_hz = SPI_SPEED;
     spi[0].bits_per_word = SPI_BITS;
-    spi[0].cs_change = 0;
+    spi[0].cs_change = 1;
     spi[0].tx_nbits = 0;
     spi[0].rx_nbits = 0;
     spi[1].tx_buf = (unsigned long)NULL;
@@ -136,7 +194,7 @@ static int SpiRead(int pDevHandle, char* pBuffer, int nBytesToRead) {
     spi[1].delay_usecs = 0;
     spi[1].speed_hz = SPI_SPEED;
     spi[1].bits_per_word = SPI_BITS;
-    spi[1].cs_change = 0;
+    spi[1].cs_change = 1;
     spi[1].tx_nbits = 0;
     spi[1].rx_nbits = 0;
     numRead = ioctl(pDevHandle, SPI_IOC_MESSAGE(2), &spi);
@@ -149,10 +207,12 @@ int tml_open(int * handle)
     unsigned char spi_mode = SPI_MODE;
     unsigned char spi_bitsPerWord = SPI_BITS;
     static unsigned int speed = SPI_SPEED;
-    iInterruptFd = verifyPin(PIN_INT, 0, EDGE_RISING);
-    iEnableFd = verifyPin(PIN_ENABLE, 1, EDGE_NONE);
+    *handle = -1;
+
+    if (openGpio() < 0) goto error;
+
     *handle = open(SPI_BUS, O_RDWR | O_NOCTTY);
-    if((*handle <= 0) || (iInterruptFd <= 0) || (iEnableFd <= 0)) goto error;
+    if(*handle < 0) goto error;
     if(ioctl(*handle, SPI_IOC_WR_MODE, &spi_mode) < 0) goto error;
     if(ioctl(*handle, SPI_IOC_RD_MODE, &spi_mode) < 0) goto error;
     if(ioctl(*handle, SPI_IOC_WR_BITS_PER_WORD, &spi_bitsPerWord) < 0) goto error;
@@ -162,24 +222,30 @@ int tml_open(int * handle)
     return 0;
 
 error:
-    if (iEnableFd) close(iEnableFd);
-    if (iInterruptFd) close(iInterruptFd);
-    if (*handle) close(*handle);
+    closeGpio();
+    if (*handle >= 0) close(*handle);
+    *handle = -1;
     return -1;
 }
 
 void tml_close(int handle)
 {
-    if(iEnableFd) close(iEnableFd);
-    if(iInterruptFd) close(iInterruptFd);
-    if(handle) close(handle);
+    closeGpio();
+    if(handle >= 0) close(handle);
 }
 
 void tml_reset(int handle)
 {
-    if(iEnableFd) write(iEnableFd, "0", 1 );
+    (void)handle;
+    if(gEnableLine.request) {
+        gpiod_line_request_set_value(gEnableLine.request, gEnableLine.offset,
+                                     GPIOD_LINE_VALUE_INACTIVE);
+    }
     usleep(10 * 1000);
-    if(iEnableFd) write(iEnableFd, "1", 1 );
+    if(gEnableLine.request) {
+        gpiod_line_request_set_value(gEnableLine.request, gEnableLine.offset,
+                                     GPIOD_LINE_VALUE_ACTIVE);
+    }
     usleep(10 * 1000);
 }
 
@@ -200,7 +266,7 @@ int tml_send(int handle, char *pBuff, int buffLen)
     spi.bits_per_word = SPI_BITS;
     spi.tx_nbits = 0;
     spi.rx_nbits = 0;
-    spi.cs_change = 0;
+    spi.cs_change = 1;
     ret = ioctl(handle, SPI_IOC_MESSAGE(1), &spi);
     if (rx_buf[0] != 0xFF) ret =0;
     else PRINT_BUF(">> ", pBuff, buffLen);
@@ -215,15 +281,15 @@ int tml_receive(int handle, char *pBuff, int buffLen)
     fd_set rfds;
     int ret;
 
-    if(pnGetint())
+    //if(pnGetint())
     {
         FD_ZERO(&rfds);
         FD_SET(handle, &rfds);
         tv.tv_sec = 2;
         tv.tv_usec = 1;
 
-        ret = select(handle+1, &rfds, NULL, NULL, &tv);
-        if(ret <= 0) return 0;
+        // ret = select(handle+1, &rfds, NULL, NULL, &tv);
+        // if(ret <= 0) return 0;
 
         ret = SpiRead(handle, pBuff, 3);
         if (ret <= 0) return 0;
@@ -246,7 +312,7 @@ int tml_transceive(int handle, char *pTx, int TxLen, char *pRx, int RxLen)
     if(tml_send(handle, pTx, TxLen) == 0) {
 	if(tml_send(handle, pTx, TxLen) == 0) return 0;
     }
-    while(NbBytes==0) NbBytes = tml_receive(handle, pRx, RxLen);
+    while(NbBytes==0) {usleep(10000); NbBytes = tml_receive(handle, pRx, RxLen);}
     return NbBytes;
 }
 

@@ -8,7 +8,7 @@ CFILES_SPI= tml_alt-spi.c
 
 INCLUDES= -I/usr/include/ -I./
 
-LIBS=
+LIBS=-lgpiod
 
 CFLAGS=-Wall $(INCLUDES)
 

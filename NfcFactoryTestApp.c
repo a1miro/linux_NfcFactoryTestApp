@@ -454,6 +454,8 @@ int main()
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
 
+    tml_reset(0);
+
     TP();
 
     if(tml_open(&nHandle) != 0) {

@@ -86,7 +86,9 @@ int tml_receive(int handle, char *pBuff, int buffLen)
     }
 
     TP();
+    usleep(100 * 1000);
     ret = read(handle, pBuff, 3);
+    PRINT_BUF("<< ", pBuff, 3);
     TP();
     if (ret <= 0){TP(); return 0;}
     numRead = 3;
